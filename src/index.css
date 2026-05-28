@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  background-color: #f8fafc;
+  color: #1e293b;
+}
+
+:root {
+  --sasc-navy: #1B1F8A;
+  --sasc-pink: #E91E8C;
+  --sasc-green: #8DC63F;
+}
