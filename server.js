@@ -51,7 +51,7 @@ const authenticateSuperAdmin = (req, res, next) => {
 
 // ==================== AUTH ====================
 
-app.post('/api/auth/login', async (req, res) => {
+
   try {
     const { email, password } = req.body;
     const result = await pool.query('SELECT * FROM admins WHERE email = $1', [email]);
@@ -68,23 +68,50 @@ app.post('/api/auth/login', async (req, res) => {
     res.json({ token, admin: { ...admin, password: undefined }, college: college.rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/auth/student-login', async (req, res) => {
+  }app.post('/api/auth/login', async (req, res) => {
   try {
-    const { studentNumber, password } = req.body;
-    const result = await pool.query('SELECT * FROM students WHERE student_number = $1', [studentNumber]);
-    if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid student number or password' });
-    const student = result.rows[0];
-    const validPassword = await bcrypt.compare(password, student.password);
-    if (!validPassword) return res.status(401).json({ error: 'Invalid student number or password' });
+    const { email, password } = req.body;
+    const result = await pool.query('SELECT * FROM admins WHERE email = $1', [email]);
+    if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid email or password' });
+    const admin = result.rows[0];
+    const validPassword = await bcrypt.compare(password, admin.password);
+    if (!validPassword) return res.status(401).json({ error: 'Invalid email or password' });
+    const college = await pool.query('SELECT * FROM colleges WHERE id = $1', [admin.college_id]);
+    const campuses = await pool.query('SELECT * FROM campuses WHERE college_id = $1', [admin.college_id]);
     const token = jwt.sign(
-      { id: student.id, studentNumber: student.student_number, role: 'student', collegeId: student.college_id },
+      { id: admin.id, email: admin.email, role: admin.role, collegeId: admin.college_id, campus: admin.campus },
       process.env.JWT_SECRET || 'sasc-secret-key',
       { expiresIn: '8h' }
     );
-    res.json({ token, student: { ...student, password: undefined } });
+
+    // Log session
+    await pool.query(`
+      INSERT INTO sessions (admin_id, college_id, token, expires_at)
+      VALUES ($1, $2, $3, NOW() + INTERVAL '8 hours')
+    `, [admin.id, admin.college_id, token]);
+
+    // Create welcome notification
+    await pool.query(`
+      INSERT INTO notifications (college_id, title, message, type)
+      VALUES ($1, $2, $3, 'info')
+    `, [admin.college_id, `${admin.name} logged in`, `${admin.role} login at ${new Date().toLocaleString('en-ZA')}`, 'login']);
+
+    res.json({
+      token,
+      admin: { ...admin, password: undefined },
+      college: { ...college.rows[0], campuses: campuses.rows },
+      role: admin.role,
+      permissions: {
+        canRegister: ['admin', 'superadmin'].includes(admin.role),
+        canViewStudents: true,
+        canCaptureMarks: ['admin', 'superadmin', 'lecturer'].includes(admin.role),
+        canViewFinance: ['admin', 'superadmin', 'principal'].includes(admin.role),
+        canEditFinance: ['admin', 'superadmin'].includes(admin.role),
+        canTakeAttendance: ['admin', 'superadmin', 'lecturer'].includes(admin.role),
+        canExport: ['admin', 'superadmin', 'principal'].includes(admin.role),
+        canCommunicate: ['admin', 'superadmin'].includes(admin.role),
+      }
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -384,6 +411,86 @@ app.get('/api/colleges/:slug', async (req, res) => {
     if (result.rows.length === 0) return res.status(404).json({ error: 'College not found' });
     const campuses = await pool.query('SELECT * FROM campuses WHERE college_id = $1', [result.rows[0].id]);
     res.json({ ...result.rows[0], campuses: campuses.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== NOTIFICATIONS ====================
+
+app.get('/api/notifications', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM notifications WHERE college_id = $1 ORDER BY created_at DESC LIMIT 20',
+      [req.user.collegeId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/notifications/:id/read', authenticateToken, async (req, res) => {
+  try {
+    await pool.query('UPDATE notifications SET is_read = true WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== INVOICES ====================
+
+app.get('/api/invoices', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM invoices WHERE college_id = $1 ORDER BY created_at DESC',
+      [req.user.collegeId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/super/invoices', authenticateSuperAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT i.*, c.name as college_name 
+      FROM invoices i 
+      JOIN colleges c ON i.college_id = c.id 
+      ORDER BY i.created_at DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/super/invoices', authenticateSuperAdmin, async (req, res) => {
+  try {
+    const { collegeId, amount, dueDate } = req.body;
+    const count = await pool.query('SELECT COUNT(*) FROM invoices WHERE college_id = $1', [collegeId]);
+    const invoiceNumber = `INV-${new Date().getFullYear()}-${String(parseInt(count.rows[0].count) + 1).padStart(3, '0')}`;
+    const result = await pool.query(`
+      INSERT INTO invoices (college_id, invoice_number, amount, status, due_date)
+      VALUES ($1, $2, $3, 'unpaid', $4) RETURNING *
+    `, [collegeId, invoiceNumber, amount, dueDate]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/super/invoices/:id/pay', authenticateSuperAdmin, async (req, res) => {
+  try {
+    const { paymentMethod, reference } = req.body;
+    await pool.query(`
+      UPDATE invoices 
+      SET status = 'paid', paid_date = NOW(), payment_method = $1, payment_reference = $2
+      WHERE id = $3
+    `, [paymentMethod, reference, req.params.id]);
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
