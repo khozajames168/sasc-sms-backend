@@ -354,6 +354,288 @@ app.get('/api/invoices', authenticateToken, async (req, res) => {
   }
 });
 
+// ==================== SMS ====================
+
+app.post('/api/sms/send', authenticateToken, async (req, res) => {
+  try {
+    const { recipients, message } = req.body;
+
+    if (!recipients || recipients.length === 0) {
+      return res.status(400).json({ error: 'No recipients provided' });
+    }
+
+    const tokenId = process.env.BULKSMS_TOKEN_ID;
+    const tokenSecret = process.env.BULKSMS_TOKEN_SECRET;
+
+    const credentials = Buffer.from(`${tokenId}:${tokenSecret}`).toString('base64');
+
+    const messages = recipients.map(number => ({
+      to: number.replace(/\s/g, '').replace(/^0/, '+27'),
+      body: message,
+    }));
+
+    const response = await fetch('https://api.bulksms.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Basic ${credentials}`,
+      },
+      body: JSON.stringify(messages),
+    });
+
+    const data = await response.json();
+
+    if (response.ok) {
+      // Log to notifications
+      await pool.query(`
+        INSERT INTO notifications (college_id, title, message, type)
+        VALUES ($1, $2, $3, 'sms')
+      `, [req.user.collegeId, `SMS sent to ${recipients.length} students`, message.substring(0, 100)]);
+
+      res.json({ success: true, sent: recipients.length, data });
+    } else {
+      res.status(400).json({ error: 'SMS sending failed', details: data });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== PASSWORD CHANGE ====================
+
+app.post('/api/auth/change-password', authenticateToken, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const result = await pool.query('SELECT * FROM admins WHERE id = $1', [req.user.id]);
+    const admin = result.rows[0];
+    const validPassword = await bcrypt.compare(currentPassword, admin.password);
+    if (!validPassword) return res.status(401).json({ error: 'Current password is incorrect' });
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await pool.query(
+      'UPDATE admins SET password = $1, must_change_password = false WHERE id = $2',
+      [hashedPassword, req.user.id]
+    );
+    res.json({ success: true, message: 'Password changed successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/auth/student-change-password', authenticateToken, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const result = await pool.query('SELECT * FROM students WHERE id = $1', [req.user.id]);
+    const student = result.rows[0];
+    const validPassword = await bcrypt.compare(currentPassword, student.password);
+    if (!validPassword) return res.status(401).json({ error: 'Current password is incorrect' });
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await pool.query('UPDATE students SET password = $1 WHERE id = $2', [hashedPassword, req.user.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== ASSESSMENTS ====================
+
+app.get('/api/assessments/:course', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM assessments WHERE college_id = $1 AND course = $2 ORDER BY created_at DESC',
+      [req.user.collegeId, decodeURIComponent(req.params.course)]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/assessments', authenticateToken, async (req, res) => {
+  try {
+    const { course, subject, title, type, weight, maxMark, dueDate } = req.body;
+    const result = await pool.query(`
+      INSERT INTO assessments (college_id, course, subject, title, type, weight, max_mark, due_date, created_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [req.user.collegeId, course, subject, title, type, weight, maxMark, dueDate, req.user.id]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/assessments/:id/results', authenticateToken, async (req, res) => {
+  try {
+    const { results } = req.body;
+    for (const r of results) {
+      await pool.query(`
+        INSERT INTO assessment_results (assessment_id, student_id, student_number, student_name, mark)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (assessment_id, student_number)
+        DO UPDATE SET mark = $5`,
+        [req.params.id, r.studentId, r.studentNumber, r.studentName, r.mark]
+      );
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== DEREGISTRATION ====================
+
+app.get('/api/deregistration', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM deregistration_requests WHERE college_id = $1 ORDER BY created_at DESC',
+      [req.user.collegeId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/deregistration/request', authenticateToken, async (req, res) => {
+  try {
+    const { studentId, studentNumber, studentName, reason, requestedBy } = req.body;
+    const result = await pool.query(`
+      INSERT INTO deregistration_requests (college_id, student_id, student_number, student_name, reason, requested_by)
+      VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [req.user.collegeId, studentId, studentNumber, studentName, reason, requestedBy || 'admin']
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/deregistration/:id/approve', authenticateToken, async (req, res) => {
+  try {
+    const request = await pool.query('SELECT * FROM deregistration_requests WHERE id = $1', [req.params.id]);
+    if (request.rows.length === 0) return res.status(404).json({ error: 'Request not found' });
+    await pool.query(`
+      UPDATE deregistration_requests 
+      SET status = 'approved', approved_by = $1, approved_at = NOW()
+      WHERE id = $2`,
+      [req.user.email, req.params.id]
+    );
+    await pool.query(
+      'UPDATE students SET status = $1, deregistration_status = $2 WHERE id = $3',
+      ['Deregistered', 'approved', request.rows[0].student_id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/deregistration/:id/reject', authenticateToken, async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE deregistration_requests SET status = $1 WHERE id = $2',
+      ['rejected', req.params.id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== DELETE STUDENT ====================
+
+app.delete('/api/students/:id', authenticateToken, async (req, res) => {
+  try {
+    const { confirmName, reason } = req.body;
+    const student = await pool.query('SELECT * FROM students WHERE id = $1 AND college_id = $2', 
+      [req.params.id, req.user.collegeId]);
+    if (student.rows.length === 0) return res.status(404).json({ error: 'Student not found' });
+    const fullName = `${student.rows[0].first_name} ${student.rows[0].last_name}`;
+    if (confirmName !== fullName) {
+      return res.status(400).json({ error: 'Name confirmation does not match. Student not deleted.' });
+    }
+    await pool.query(`
+      UPDATE students 
+      SET is_deleted = true, deleted_at = NOW(), deleted_by = $1, status = 'Deleted'
+      WHERE id = $2`,
+      [req.user.email, req.params.id]
+    );
+    res.json({ success: true, message: `${fullName} has been deleted` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== LECTURER ASSIGNED COURSE ====================
+
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM admins WHERE id = $1', [req.user.id]);
+    const admin = result.rows[0];
+    res.json({ ...admin, password: undefined });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== DHET EXPORT/IMPORT ====================
+
+app.get('/api/dhet/export', authenticateToken, async (req, res) => {
+  try {
+    const students = await pool.query(
+      'SELECT * FROM students WHERE college_id = $1 AND is_deleted = false ORDER BY student_number',
+      [req.user.collegeId]
+    );
+    const college = await pool.query('SELECT * FROM colleges WHERE id = $1', [req.user.collegeId]);
+    const c = college.rows[0];
+
+    let text = `SA SHEPHERD COLLEGE - DHET STUDENT SUBMISSION\n`;
+    text += `Exam Center: ${c.dhet_number || '6999 926 54'}\n`;
+    text += `Generated: ${new Date().toLocaleDateString('en-ZA')}\n`;
+    text += `Total Students: ${students.rows.length}\n`;
+    text += `${'='.repeat(80)}\n\n`;
+    text += `STUDENT_NUMBER|SURNAME|FIRST_NAME|ID_NUMBER|GENDER|DOB|COURSE|CAMPUS|STATUS\n`;
+    text += `${'='.repeat(80)}\n`;
+
+    students.rows.forEach(s => {
+      text += `${s.student_number}|${s.last_name}|${s.first_name}|${s.id_number}|${s.gender || ''}|${s.date_of_birth || ''}|${s.course}|${s.campus}|${s.status}\n`;
+    });
+
+    res.setHeader('Content-Type', 'text/plain');
+    res.setHeader('Content-Disposition', `attachment; filename=DHET_Submission_${new Date().getFullYear()}.txt`);
+    res.send(text);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/dhet/import', authenticateToken, async (req, res) => {
+  try {
+    const { content } = req.body;
+    const lines = content.split('\n').filter(line => line.includes('|'));
+    const header = lines[0];
+    const dataLines = lines.slice(1).filter(l => !l.startsWith('='));
+
+    const results = dataLines.map(line => {
+      const parts = line.split('|');
+      return {
+        studentNumber: parts[0]?.trim(),
+        surname: parts[1]?.trim(),
+        firstName: parts[2]?.trim(),
+        idNumber: parts[3]?.trim(),
+        gender: parts[4]?.trim(),
+        dob: parts[5]?.trim(),
+        course: parts[6]?.trim(),
+        campus: parts[7]?.trim(),
+        status: parts[8]?.trim(),
+      };
+    }).filter(r => r.studentNumber);
+
+    res.json({ success: true, records: results, total: results.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 // HEALTH CHECK
 app.get('/api/health', (req, res) => {
   res.json({ status: 'EduTrack SMS API is running', version: '2.0' });

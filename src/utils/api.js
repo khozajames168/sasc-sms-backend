@@ -46,6 +46,13 @@ export const logout = () => {
   localStorage.removeItem('college');
   localStorage.removeItem('role');
 };
+export const logout = () => {
+  localStorage.removeItem('token');
+  localStorage.removeItem('admin');
+  localStorage.removeItem('permissions');
+  localStorage.removeItem('college');
+  localStorage.removeItem('role');
+};
 
 // Students
 export const getStudents = async () => {

@@ -8,105 +8,75 @@ const pool = new Pool({
 
 const migrate = async () => {
   try {
-    console.log('Running role-based access migration...');
+    console.log('Adding course assignment to admins...');
 
-    // Add role column to admins if not exists
-    await pool.query(`ALTER TABLE admins ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'admin'`);
-    
-    // Add permissions table
+    await pool.query(`ALTER TABLE admins ADD COLUMN IF NOT EXISTS assigned_course VARCHAR(200)`);
+    await pool.query(`ALTER TABLE admins ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT true`);
+    await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS deregistration_requested BOOLEAN DEFAULT false`);
+    await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS deregistration_reason TEXT`);
+    await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS deregistration_status VARCHAR(20) DEFAULT 'active'`);
+    await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT false`);
+    await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP`);
+    await pool.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(100)`);
+
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS roles (
+      CREATE TABLE IF NOT EXISTS deregistration_requests (
         id SERIAL PRIMARY KEY,
         college_id INTEGER,
-        name VARCHAR(100) NOT NULL,
-        email VARCHAR(100) UNIQUE NOT NULL,
-        password VARCHAR(255) NOT NULL,
-        role VARCHAR(20) NOT NULL DEFAULT 'admin',
-        campus VARCHAR(100),
-        can_register BOOLEAN DEFAULT true,
-        can_view_students BOOLEAN DEFAULT true,
-        can_capture_marks BOOLEAN DEFAULT true,
-        can_view_finance BOOLEAN DEFAULT true,
-        can_edit_finance BOOLEAN DEFAULT false,
-        can_take_attendance BOOLEAN DEFAULT true,
-        can_export BOOLEAN DEFAULT true,
-        can_communicate BOOLEAN DEFAULT true,
-        is_active BOOLEAN DEFAULT true,
+        student_id INTEGER REFERENCES students(id),
+        student_number VARCHAR(20),
+        student_name VARCHAR(200),
+        reason TEXT,
+        requested_by VARCHAR(50) DEFAULT 'student',
+        status VARCHAR(20) DEFAULT 'pending',
+        approved_by VARCHAR(100),
+        approved_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
 
-    // Add session tracking
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        id SERIAL PRIMARY KEY,
-        admin_id INTEGER,
-        college_id INTEGER,
-        token TEXT,
-        created_at TIMESTAMP DEFAULT NOW(),
-        expires_at TIMESTAMP DEFAULT NOW() + INTERVAL '8 hours',
-        last_activity TIMESTAMP DEFAULT NOW()
-      )
-    `);
-
-    // Add notifications table
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS notifications (
+      CREATE TABLE IF NOT EXISTS assessments (
         id SERIAL PRIMARY KEY,
         college_id INTEGER,
+        course VARCHAR(200),
+        subject VARCHAR(200),
         title VARCHAR(200),
-        message TEXT,
-        type VARCHAR(50) DEFAULT 'info',
-        is_read BOOLEAN DEFAULT false,
-        created_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
-
-    // Add invoices table for payment system
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS invoices (
-        id SERIAL PRIMARY KEY,
-        college_id INTEGER REFERENCES colleges(id),
-        invoice_number VARCHAR(50) UNIQUE NOT NULL,
-        amount NUMERIC(10,2) NOT NULL,
-        status VARCHAR(20) DEFAULT 'unpaid',
+        type VARCHAR(50),
+        weight NUMERIC(5,2),
+        max_mark NUMERIC(5,2),
         due_date DATE,
-        paid_date DATE,
-        payment_method VARCHAR(50),
-        payment_reference VARCHAR(100),
+        created_by INTEGER,
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
 
-    const bcrypt = require('bcryptjs');
-    
-    // Add lecturer and principal for SA Shepherd
-    const college = await pool.query(`SELECT id FROM colleges WHERE slug = 'sashepherd'`);
-    const collegeId = college.rows[0]?.id;
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS assessment_results (
+        id SERIAL PRIMARY KEY,
+        assessment_id INTEGER REFERENCES assessments(id),
+        student_id INTEGER REFERENCES students(id),
+        student_number VARCHAR(20),
+        student_name VARCHAR(200),
+        mark NUMERIC(5,2),
+        created_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(assessment_id, student_number)
+      )
+    `);
 
-    if (collegeId) {
-      const lecturerPassword = await bcrypt.hash('lecturer123', 10);
-      const principalPassword = await bcrypt.hash('principal123', 10);
+    // Update lecturer with assigned course
+    await pool.query(`
+      UPDATE admins SET assigned_course = 'Electrical Engineering N1-N6', must_change_password = true
+      WHERE email = 'lecturer@sashepherdcollege.org.za'
+    `);
 
-      await pool.query(`
-        INSERT INTO admins (college_id, name, email, password, role, campus)
-        VALUES
-          ($1, 'Lecturer Account', 'lecturer@sashepherdcollege.org.za', $2, 'lecturer', 'Burgersfort Campus'),
-          ($1, 'Principal Account', 'principal@sashepherdcollege.org.za', $3, 'principal', 'All Campuses')
-        ON CONFLICT (email) DO NOTHING
-      `, [collegeId, lecturerPassword, principalPassword]);
+    // Set must_change_password for all non-superadmin
+    await pool.query(`UPDATE admins SET must_change_password = true WHERE must_change_password IS NULL`);
 
-      // Generate first invoice for SA Shepherd
-      await pool.query(`
-        INSERT INTO invoices (college_id, invoice_number, amount, status, due_date)
-        VALUES ($1, 'INV-2025-001', 2500, 'paid', '2025-01-31')
-        ON CONFLICT (invoice_number) DO NOTHING
-      `, [collegeId]);
-    }
-
-    console.log('✅ Role-based access migration complete');
-    console.log('✅ Lecturer login: lecturer@sashepherdcollege.org.za / lecturer123');
-    console.log('✅ Principal login: principal@sashepherdcollege.org.za / principal123');
+    console.log('✅ Migration complete');
+    console.log('✅ Course assignment added');
+    console.log('✅ Deregistration tables created');
+    console.log('✅ Assessment tables created');
     process.exit(0);
   } catch (err) {
     console.error('Migration error:', err.message);
