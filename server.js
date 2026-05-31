@@ -304,12 +304,13 @@ app.post('/api/attendance', authenticateToken, async (req, res) => {
 app.get('/api/stats', authenticateToken, async (req, res) => {
   try {
     const collegeId = req.user.collegeId;
-    const students = await pool.query('SELECT COUNT(*) FROM students WHERE college_id = $1', [collegeId]);
-    const activeStudents = await pool.query("SELECT COUNT(*) FROM students WHERE college_id = $1 AND status = 'Active'", [collegeId]);
-    const totalFees = await pool.query('SELECT SUM(total_fee) FROM students WHERE college_id = $1', [collegeId]);
-    const totalPaid = await pool.query('SELECT SUM(amount) FROM finance WHERE college_id = $1', [collegeId]);
-    const burgersfort = await pool.query("SELECT COUNT(*) FROM students WHERE college_id = $1 AND campus = 'Burgersfort Campus'", [collegeId]);
-    const polokwane = await pool.query("SELECT COUNT(*) FROM students WHERE college_id = $1 AND campus = 'Polokwane Campus'", [collegeId]);
+    
+  const students = await pool.query('SELECT COUNT(*) FROM students WHERE college_id = $1 AND is_deleted = false', [collegeId]);
+const activeStudents = await pool.query("SELECT COUNT(*) FROM students WHERE college_id = $1 AND status = 'Active' AND is_deleted = false", [collegeId]);
+const totalFees = await pool.query('SELECT SUM(total_fee) FROM students WHERE college_id = $1 AND is_deleted = false', [collegeId]);
+const totalPaid = await pool.query('SELECT SUM(amount) FROM finance WHERE college_id = $1', [collegeId]);
+const burgersfort = await pool.query("SELECT COUNT(*) FROM students WHERE college_id = $1 AND campus = 'Burgersfort Campus' AND is_deleted = false", [collegeId]);
+const polokwane = await pool.query("SELECT COUNT(*) FROM students WHERE college_id = $1 AND campus = 'Polokwane Campus' AND is_deleted = false", [collegeId]);
     res.json({ totalStudents: parseInt(students.rows[0].count), activeStudents: parseInt(activeStudents.rows[0].count), totalFees: parseFloat(totalFees.rows[0].sum || 0), totalPaid: parseFloat(totalPaid.rows[0].sum || 0), burgersfort: parseInt(burgersfort.rows[0].count), polokwane: parseInt(polokwane.rows[0].count) });
   } catch (err) {
     res.status(500).json({ error: err.message });
