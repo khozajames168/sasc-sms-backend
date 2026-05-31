@@ -211,7 +211,10 @@ app.patch('/api/super/invoices/:id/pay', authenticateSuperAdmin, async (req, res
 // STUDENTS
 app.get('/api/students', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM students WHERE college_id = $1 ORDER BY created_at DESC', [req.user.collegeId]);
+    const result = await pool.query(
+      'SELECT * FROM students WHERE college_id = $1 AND is_deleted = false ORDER BY created_at DESC',
+      [req.user.collegeId]
+    );
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
