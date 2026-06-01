@@ -640,6 +640,48 @@ app.post('/api/dhet/import', authenticateToken, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ==================== STAFF MANAGEMENT ====================
+
+app.get('/api/staff', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT id, name, email, role, campus, assigned_course, must_change_password, created_at, true as is_active FROM admins WHERE college_id = $1 AND role != 'superadmin' ORDER BY created_at DESC",
+      [req.user.collegeId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/staff', authenticateToken, async (req, res) => {
+  try {
+    const { name, email, password, role, campus, assignedCourse } = req.body;
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const result = await pool.query(`
+      INSERT INTO admins (college_id, name, email, password, role, campus, assigned_course, must_change_password)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, true) RETURNING id, name, email, role, campus, assigned_course`,
+      [req.user.collegeId, name, email, hashedPassword, role, campus, assignedCourse || null]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/staff/:id/status', authenticateToken, async (req, res) => {
+  try {
+    const { active } = req.body;
+    await pool.query(
+      'UPDATE admins SET role = CASE WHEN $1 THEN role ELSE $2 END WHERE id = $3',
+      [active, 'inactive', req.params.id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 // HEALTH CHECK
 app.get('/api/health', (req, res) => {
   res.json({ status: 'EduTrack SMS API is running', version: '2.0' });
